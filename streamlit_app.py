@@ -107,6 +107,11 @@ def signal_of(ph, dth, kmin):
 
 SIG_COL={"BUY":BUY,"SELL":SELL,"HOLD":HOLD,"SCHOCK":SHOCK}
 
+# Anzeige-Beschriftung (intern bleiben die Schlüssel BUY/SELL/SCHOCK/HOLD unverändert).
+# Neutrale Zustandsworte statt Handlungsworte – siehe Erklärkasten im Kopf.
+LABEL={"BUY":"Aufwärts-kohärent","SELL":"Abwärts-kohärent",
+       "SCHOCK":"Regime-Bruch","HOLD":"Keine Kohärenz"}
+
 # ============================================================
 #  DATEN: Energie-Instrumente (frei) + Platzhalter für ENTSO-E
 # ============================================================
@@ -155,6 +160,30 @@ ticker=ENERGIE[markt_name]; period,interval=ZEIT[zeit_name]
 st.title("⚡ ShiftWN Energy")
 st.markdown(f"<div class='app-sub'>Backtest-Controlling für Energiemärkte · Patent EPA EP25221251.9 · "
             f"Stand {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</div>", unsafe_allow_html=True)
+
+# ---- Bedienungsanleitung: Was bedeuten die Signale? ----
+with st.expander("Was bedeuten die Signale?"):
+    st.markdown(
+        "**ShiftWN beschreibt die Marktstruktur, nicht eine Handlung.** "
+        "Der Backtest zeigt rückschauend, wie ShiftWN den Markt eingeschätzt hätte.\n\n"
+        "- **Aufwärts-kohärent** (früher BUY): Aufwärtsbewegung trägt stabil.\n"
+        "- **Abwärts-kohärent** (früher SELL): Abwärtsbewegung trägt stabil.\n"
+        "- **Regime-Bruch** (früher SCHOCK): Struktur bricht — höchste Warnung.\n"
+        "- **Keine Kohärenz** (HOLD): kein klarer Zustand.\n\n"
+        "_„Aufwärts/abwärts\" meint den Markt, nicht eine Position. Ein Käufer und "
+        "ein Verkäufer ziehen daraus gegenteilige Schlüsse. Signalgeber, keine Order — "
+        "keine Anlageberatung._"
+    )
+
+with st.expander("Was bedeuten Drift und Aussagekraft?"):
+    st.markdown(
+        "- **Drift:** Stärke und Richtung der Bewegung. Hoch = klarer Trend, "
+        "nahe Null = seitwärts.\n"
+        "- **Aussagekraft (κ):** Wie verlässlich das Signal ist. Hoch = Struktur "
+        "eindeutig, niedrig = unsicher/blind.\n\n"
+        "_Über die Regler links legst du fest, ab welcher Drift und welcher "
+        "Mindest-Aussagekraft ShiftWN im Backtest überhaupt ein Signal vergibt._"
+    )
 
 with st.spinner(f"Lade {markt_name} ..."):
     closes, idx = lade_energie(ticker, period, interval)
@@ -224,12 +253,12 @@ for sig,colr in [("BUY",BUY),("SELL",SELL),("SCHOCK",SHOCK)]:
     pts=[(r[0]-1, r[5]) for r in results if r[1]==sig]
     if pts:
         fig.add_trace(go.Scatter(x=[p[0] for p in pts], y=[p[1] for p in pts], mode="markers",
-            marker=dict(color=colr,size=6,line=dict(width=0)), name=sig))
+            marker=dict(color=colr,size=6,line=dict(width=0)), name=LABEL.get(sig, sig)))
 fig.update_layout(height=440, template="plotly_white", paper_bgcolor=BG, plot_bgcolor=CARD,
                   margin=dict(l=0,r=0,t=10,b=0), legend=dict(orientation="h",yanchor="bottom",y=1.0),
                   xaxis=dict(gridcolor=BORDER,title="Handelstage"), yaxis=dict(gridcolor=BORDER,title="Preis"))
 st.plotly_chart(fig, use_container_width=True)
-st.caption("Grün = BUY-kohärent · Rot = SELL-kohärent · Bernstein = Regime-Bruch. "
+st.caption("Grün = Aufwärts-kohärent · Rot = Abwärts-kohärent · Bernstein = Regime-Bruch. "
            "Graue Linie = Kursverlauf. ShiftWN ist Signalgeber, keine Order-Ausführung.")
 
 # ============================================================
@@ -241,7 +270,7 @@ with cL:
     st.markdown("**Signal-Verteilung**")
     figv=go.Figure(go.Bar(
         x=[cnt.get("BUY",0),cnt.get("HOLD",0),cnt.get("SELL",0),cnt.get("SCHOCK",0)],
-        y=["BUY","HOLD","SELL","SCHOCK"], orientation="h",
+        y=[LABEL["BUY"],LABEL["HOLD"],LABEL["SELL"],LABEL["SCHOCK"]], orientation="h",
         marker_color=[BUY,HOLD,SELL,SHOCK],
         text=[cnt.get("BUY",0),cnt.get("HOLD",0),cnt.get("SELL",0),cnt.get("SCHOCK",0)], textposition="auto"))
     figv.update_layout(height=240, template="plotly_white", paper_bgcolor=BG, plot_bgcolor=CARD,
@@ -257,8 +286,8 @@ with cR:
             cnow=SIG_COL.get(now,MUTED)
             st.markdown(f"<div class='infobox' style='padding:8px 12px;margin-bottom:6px'>"
                         f"<span style='color:{MUTED};font-size:.78rem'>{datum}</span> · "
-                        f"<span style='color:{MUTED}'>{prev}</span> → "
-                        f"<span style='color:{cnow};font-weight:700'>{now}</span> "
+                        f"<span style='color:{MUTED}'>{LABEL.get(prev,prev)}</span> → "
+                        f"<span style='color:{cnow};font-weight:700'>{LABEL.get(now,now)}</span> "
                         f"<span style='color:{FAINT};font-size:.76rem'>· Preis {preis:,.2f}</span></div>",
                         unsafe_allow_html=True)
 
