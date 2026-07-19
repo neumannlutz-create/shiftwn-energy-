@@ -429,7 +429,10 @@ with cR:
         st.caption("Keine Signalwechsel in diesem Zeitraum.")
     else:
         for pos,prev,now,preis in reversed(wechsel[-12:]):
-            datum = str(idx[pos-1])[:10] if idx is not None and pos-1 < len(idx) else f"Tag {pos}"
+            if idx is not None and pos-1 < len(idx):
+                datum = str(idx[pos-1])[:16] if strom_stuendlich else str(idx[pos-1])[:10]
+            else:
+                datum = f"Stunde {pos}" if strom_stuendlich else f"Tag {pos}"
             cnow=SIG_COL.get(now,MUTED)
             st.markdown(f"<div class='infobox' style='padding:8px 12px;margin-bottom:6px'>"
                         f"<span style='color:{MUTED};font-size:.78rem'>{datum}</span> · "
@@ -439,6 +442,74 @@ with cR:
                         unsafe_allow_html=True)
 
 st.markdown("---")
+
+# ============================================================
+#  4) TAGESPROFIL  (nur bei Stundenauflösung)
+#     Prüft, ob Regime-Brüche an bestimmte Tageszeiten gebunden sind.
+#     Häufung mittags/abends = echtes Signal (Solardelle, Abendspitze).
+#     Gleichverteilung = Schwelle vermutlich zu empfindlich.
+# ============================================================
+if strom_stuendlich and idx is not None:
+    st.markdown(f"## <span class='num'>4</span> Tagesprofil der Regime-Brüche", unsafe_allow_html=True)
+
+    stunden_brueche=[0]*24
+    stunden_gesamt=[0]*24
+    for pos,sig,_,_,_,_ in results:
+        if pos-1 < len(idx):
+            h=idx[pos-1].hour
+            stunden_gesamt[h]+=1
+            if sig=="SCHOCK":
+                stunden_brueche[h]+=1
+
+    anteil=[(stunden_brueche[h]/stunden_gesamt[h]*100) if stunden_gesamt[h] else 0.0
+            for h in range(24)]
+
+    dL,dR=st.columns([3,2])
+    with dL:
+        figt=go.Figure()
+        figt.add_trace(go.Bar(x=[f"{h:02d}" for h in range(24)], y=anteil,
+                              marker_color=[SHOCK if a>=max(anteil)*0.6 and max(anteil)>0 else MUTED
+                                            for a in anteil],
+                              hovertemplate="%{x}:00 Uhr · %{y:.1f}%<extra></extra>"))
+        figt.update_layout(height=300, margin=dict(l=10,r=10,t=10,b=10),
+                           paper_bgcolor=BG, plot_bgcolor=CARD,
+                           xaxis=dict(gridcolor=BORDER,title="Stunde des Tages (UTC)"),
+                           yaxis=dict(gridcolor=BORDER,title="Anteil Regime-Brüche in %"))
+        st.plotly_chart(figt, use_container_width=True)
+
+    with dR:
+        gesamt=sum(stunden_brueche)
+        if gesamt==0:
+            st.caption("In diesem Zeitraum wurden keine Regime-Brüche erkannt.")
+        else:
+            spitze=max(range(24), key=lambda h: anteil[h])
+            mittel=sum(anteil)/24
+            # Streuung als einfaches Maß: Verhältnis Spitze zu Durchschnitt.
+            konzentration = anteil[spitze]/mittel if mittel>0 else 0
+            st.markdown(f"**Häufigste Stunde:** {spitze:02d}:00 UTC "
+                        f"({anteil[spitze]:.1f} % der Stunden dieser Uhrzeit)")
+            st.markdown(f"**Durchschnitt über alle Stunden:** {mittel:.1f} %")
+            st.markdown(f"**Konzentration:** {konzentration:.1f}× über dem Mittel")
+            st.markdown("")
+            if konzentration>=2.2:
+                st.markdown("<div class='infobox'>Die Brüche sind deutlich an bestimmte "
+                            "Tageszeiten gebunden. Das spricht für einen realen Struktureffekt "
+                            "(Einspeisungsprofil), nicht für eine zu empfindliche Schwelle.</div>",
+                            unsafe_allow_html=True)
+            elif konzentration>=1.6:
+                st.markdown("<div class='infobox'>Es zeigt sich eine erkennbare, aber moderate "
+                            "Bindung an Tageszeiten. Teils Struktureffekt, teils Schwellenwirkung.</div>",
+                            unsafe_allow_html=True)
+            else:
+                st.markdown("<div class='infobox'>Die Brüche verteilen sich weitgehend gleichmäßig "
+                            "über den Tag. Das spricht eher für eine zu empfindlich gesetzte "
+                            "Schwelle als für einen tageszeitlichen Struktureffekt.</div>",
+                            unsafe_allow_html=True)
+
+    st.caption("Zeiten in UTC. Die deutsche Solarspitze liegt im Sommer bei etwa 10–12 UTC, "
+               "die Abendspitze bei etwa 17–19 UTC.")
+    st.markdown("---")
+
 st.caption("ShiftWN Energy · Phase 1: Backtest-Controlling · Patentierter geometrischer Kern "
            "(Triangle · Vortex · Impulse FFT · Photonics). Rückschauende Analyse auf historischen Daten. "
            "Vergangene Signale sind keine Garantie für künftige Ergebnisse. Keine Anlageberatung.")
