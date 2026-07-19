@@ -14,7 +14,9 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 import yfinance as yf
-from datetime import datetime
+import urllib.request, urllib.error
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="ShiftWN Energy", layout="wide", page_icon="⚡")
 
@@ -123,6 +125,97 @@ ENERGIE={
 }
 ZEIT={"2 Jahre (täglich)":("2y","1d"),"1 Jahr (täglich)":("1y","1d"),"6 Monate (täglich)":("6mo","1d")}
 
+# ---- ENTSO-E: echte Day-Ahead-Strompreise (Gebotszonen) ----
+# Token liegt in den Streamlit Secrets, NICHT im Code.
+STROM={
+    "Strom DE-LU (Day-Ahead)": "10Y1001A1001A82H",
+    "Strom Frankreich (Day-Ahead)": "10YFR-RTE------C",
+    "Strom Niederlande (Day-Ahead)": "10YNL----------L",
+    "Strom Österreich (Day-Ahead)": "10YAT-APG------L",
+}
+STROM_ZEIT={"2 Jahre (täglich)":730,"1 Jahr (täglich)":365,"6 Monate (täglich)":180}
+
+def _entsoe_token():
+    """Token aus Streamlit Secrets. Fehlt er, gibt es None statt eines Absturzes."""
+    try:
+        return st.secrets["ENTSOE_TOKEN"]
+    except Exception:
+        return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def lade_strom(domain, tage):
+    """Day-Ahead-Spotpreise (A44) von ENTSO-E, aggregiert zu Tagesmittelwerten.
+
+    Rückgabe im gleichen Format wie lade_energie: (preise, zeitindex).
+    Die Stundenpreise werden je Tag gemittelt, damit die Geometrie auf
+    derselben Tagesbasis rechnet wie bei Gas und Öl.
+    """
+    token=_entsoe_token()
+    if not token:
+        return None, None, "kein_token"
+
+    ende=datetime.utcnow()
+    start=ende-timedelta(days=tage)
+    fmt="%Y%m%d%H00"
+
+    tagesmittel={}
+    # ENTSO-E erlaubt max. 1 Jahr pro Anfrage -> in Blöcken holen.
+    block_start=start
+    while block_start < ende:
+        block_ende=min(block_start+timedelta(days=360), ende)
+        url=("https://web-api.tp.entsoe.eu/api"
+             f"?securityToken={token}&documentType=A44"
+             f"&in_Domain={domain}&out_Domain={domain}"
+             f"&periodStart={block_start.strftime(fmt)}"
+             f"&periodEnd={block_ende.strftime(fmt)}")
+        try:
+            with urllib.request.urlopen(url, timeout=25) as r:
+                xml=r.read().decode("utf-8","ignore")
+        except urllib.error.HTTPError as e:
+            if e.code==401:
+                return None, None, "token_ungueltig"
+            return None, None, f"http_{e.code}"
+        except Exception:
+            return None, None, "netzwerk"
+
+        # XML auswerten: je TimeSeries ein Startzeitpunkt + stündliche Positionen.
+        try:
+            root=ET.fromstring(xml)
+        except ET.ParseError:
+            return None, None, "xml_fehler"
+        ns={"n": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
+        def f(tag): return f"n:{tag}" if ns else tag
+
+        for ts in root.findall(f".//{f('TimeSeries')}", ns):
+            per=ts.find(f(  "Period"), ns)
+            if per is None: continue
+            zs=per.find(f("timeInterval")+"/"+f("start"), ns)
+            if zs is None or not zs.text: continue
+            try:
+                t0=datetime.strptime(zs.text,"%Y-%m-%dT%H:%MZ")
+            except ValueError:
+                continue
+            for pt in per.findall(f("Point"), ns):
+                pos=pt.find(f("position"), ns); pr=pt.find(f("price.amount"), ns)
+                if pos is None or pr is None: continue
+                try:
+                    stunde=t0+timedelta(hours=int(pos.text)-1)
+                    wert=float(pr.text)
+                except (TypeError, ValueError):
+                    continue
+                tag=stunde.date()
+                tagesmittel.setdefault(tag, []).append(wert)
+
+        block_start=block_ende
+
+    if not tagesmittel:
+        return None, None, "keine_daten"
+
+    tage_sortiert=sorted(tagesmittel.keys())
+    preise=np.array([float(np.mean(tagesmittel[t])) for t in tage_sortiert])
+    idx=[datetime.combine(t, datetime.min.time()) for t in tage_sortiert]
+    return preise, idx, "ok"
+
 @st.cache_data(ttl=600, show_spinner=False)
 def lade_energie(ticker, period, interval):
     try:
@@ -141,7 +234,7 @@ with st.sidebar:
     st.header("ShiftWN Energy")
     st.caption("Phase 1 · Backtest-Controlling")
     st.divider()
-    markt_name=st.selectbox("Energie-Instrument", list(ENERGIE.keys()))
+    markt_name=st.selectbox("Energie-Instrument", list(ENERGIE.keys())+list(STROM.keys()))
     zeit_name=st.selectbox("Zeitraum", list(ZEIT.keys()))
     st.divider()
     st.subheader("Signal-Schwellen")
@@ -152,9 +245,19 @@ with st.sidebar:
     annahme=st.selectbox("Naive Strategie, der ShiftWN gegenübergestellt wird",
                          ["Immer Long (Kauf-Bias)","Immer Short (Verkauf-Bias)"])
     st.divider()
-    st.caption("Echte Strom-Spotdaten (ENTSO-E Day-Ahead) folgen als Datenadapter, sobald der API-Token vorliegt.")
+    if markt_name in STROM:
+        st.caption("Quelle: ENTSO-E Transparency Platform · Day-Ahead-Spotpreise, "
+                   "zu Tagesmittelwerten aggregiert.")
+    else:
+        st.caption("Quelle: Terminmarktdaten (yfinance). Strom-Spotdaten stehen über "
+                   "die ENTSO-E-Auswahl zur Verfügung.")
 
-ticker=ENERGIE[markt_name]; period,interval=ZEIT[zeit_name]
+ist_strom = markt_name in STROM
+period,interval=ZEIT[zeit_name]
+if ist_strom:
+    ticker=STROM[markt_name]
+else:
+    ticker=ENERGIE[markt_name]
 
 # ---------------- Kopf ----------------
 st.title("⚡ ShiftWN Energy")
@@ -186,7 +289,23 @@ with st.expander("Was bedeuten Drift und Aussagekraft?"):
     )
 
 with st.spinner(f"Lade {markt_name} ..."):
-    closes, idx = lade_energie(ticker, period, interval)
+    if ist_strom:
+        closes, idx, status = lade_strom(ticker, STROM_ZEIT[zeit_name])
+        if status=="kein_token":
+            st.error("Für Strom-Spotdaten fehlt der ENTSO-E-Zugangsschlüssel. "
+                     "Er wird in den Streamlit-Secrets als ENTSOE_TOKEN hinterlegt "
+                     "und gehört nicht in den Code.")
+            st.stop()
+        elif status=="token_ungueltig":
+            st.error("Der hinterlegte ENTSO-E-Schlüssel wurde abgelehnt (401). "
+                     "Bitte den Token in den Streamlit-Secrets prüfen.")
+            st.stop()
+        elif status not in ("ok",):
+            st.warning(f"Die Strompreise konnten gerade nicht geladen werden ({status}). "
+                       f"Bitte kurz erneut versuchen oder ein anderes Instrument wählen.")
+            st.stop()
+    else:
+        closes, idx = lade_energie(ticker, period, interval)
 
 if closes is None or len(closes)<120:
     st.warning(f"Für {markt_name} konnten gerade nicht genügend Daten geladen werden. "
