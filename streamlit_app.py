@@ -510,6 +510,94 @@ if strom_stuendlich and idx is not None:
                "die Abendspitze bei etwa 17–19 UTC.")
     st.markdown("---")
 
+# ============================================================
+#  5) SURROGAT-TEST  (nur bei Stundenauflösung)
+#     Ist die Tageszeit-Bindung der Brüche statistisch echt oder
+#     bloß eine zu empfindliche Schwelle?
+#     Methode: Aufeinanderfolgende Brüche werden zu je einem Ereignis
+#     zusammengefasst; deren Onset-Uhrzeiten werden gegen 4000
+#     Zufallsverteilungen getestet. Kleiner p-Wert = echte Bindung.
+#     Nutzt denselben Vier-Ebenen-Kern (Triangle · Vortex ·
+#     Impulse-FFT · Photonics) über die bereits berechneten results.
+# ============================================================
+if strom_stuendlich and idx is not None:
+    st.markdown(f"## <span class='num'>5</span> Surrogat-Test der Tageszeit-Bindung", unsafe_allow_html=True)
+
+    hrs = np.array([idx[r[0]-1].hour for r in results], dtype=int)
+    is_schock = np.array([1 if r[1]=="SCHOCK" else 0 for r in results], dtype=int)
+    totals = np.bincount(hrs, minlength=24).astype(float)
+
+    # Aufeinanderfolgende SCHOCK-Stunden -> EIN Ereignis (Onset-Stunde).
+    # Ein mehrstündiger Bruch zählt so einmal, nicht mehrfach – sonst täuscht
+    # die Cluster-Länge eine Uhrzeit-Konzentration vor.
+    def _events(mask):
+        ev=[]; i=0; mm=len(mask)
+        while i<mm:
+            if mask[i]:
+                ev.append(int(hrs[i]))
+                while i<mm and mask[i]: i+=1
+            else:
+                i+=1
+        return np.array(ev, dtype=int)
+
+    def _konz(ev_hours):
+        b=np.bincount(ev_hours, minlength=24).astype(float)
+        rate=np.divide(b, totals, out=np.zeros(24), where=totals>0)
+        mn=rate.mean()
+        return (rate.max()/mn) if mn>0 else 0.0
+
+    ev = _events(is_schock.astype(bool)); E = len(ev)
+    if E == 0:
+        st.caption("Keine Regime-Brüche in diesem Zeitraum – der Surrogat-Test entfällt.")
+    else:
+        obs = _konz(ev)
+        N = 4000
+        rng = np.random.default_rng(0)          # fester Seed -> reproduzierbar
+        prob = totals/totals.sum()
+        null = np.array([_konz(rng.choice(24, size=E, p=prob)) for _ in range(N)])
+        p = float((np.sum(null >= obs) + 1) / (N + 1))
+        null_mean = float(null.mean()); p95 = float(np.percentile(null, 95))
+
+        sL, sR = st.columns([3,2])
+        with sL:
+            figs = go.Figure()
+            figs.add_trace(go.Histogram(x=null, nbinsx=40, marker_color=MUTED, opacity=0.75))
+            figs.add_vline(x=obs, line_color=SHOCK, line_width=3)
+            figs.add_annotation(x=obs, y=1, yref="paper", text=f"beobachtet {obs:.2f}×",
+                                showarrow=False, font=dict(color=SHOCK), xanchor="left", xshift=4)
+            figs.update_layout(height=300, margin=dict(l=10,r=10,t=10,b=10),
+                               paper_bgcolor=BG, plot_bgcolor=CARD,
+                               xaxis=dict(gridcolor=BORDER, title="Konzentration bei zufälliger Uhrzeit (Nullmodell)"),
+                               yaxis=dict(gridcolor=BORDER, title="Häufigkeit"))
+            st.plotly_chart(figs, use_container_width=True)
+        with sR:
+            st.markdown(f"**Ereignisse (zusammengefasste Brüche):** {E}")
+            st.markdown(f"**Beobachtete Konzentration:** {obs:.2f}×")
+            st.markdown(f"**Zufalls-Erwartung:** {null_mean:.2f}× (95%-Grenze {p95:.2f}×)")
+            st.markdown(f"**p-Wert:** {p:.3f}")
+            st.markdown("")
+            if p < 0.05:
+                st.markdown("<div class='infobox'>Die Tageszeit-Bindung ist <b>stärker als Zufall</b> "
+                            "(p&lt;0,05): echtes Struktursignal. Die Brüche setzen überzufällig oft zur "
+                            "gleichen Uhrzeit ein – kein bloßer Schwellen-Artefakt.</div>",
+                            unsafe_allow_html=True)
+            elif p < 0.10:
+                st.markdown("<div class='infobox'>Grenzfall (0,05&le;p&lt;0,10): erkennbare Tendenz, "
+                            "statistisch noch nicht eindeutig. Ein längerer Zeitraum klärt es.</div>",
+                            unsafe_allow_html=True)
+            else:
+                st.markdown("<div class='infobox'>Die Konzentration liegt im Bereich der Zufalls-"
+                            "Erwartung (p&ge;0,10). Keine überzufällige Uhrzeit-Bindung – konsistent "
+                            "mit einer eher zu empfindlich gesetzten Schwelle.</div>",
+                            unsafe_allow_html=True)
+
+    st.caption("Mehrstündige Brüche werden zu je einem Ereignis (Onset-Stunde) zusammengefasst; deren "
+               "Uhrzeiten werden gegen 4000 Zufallsverteilungen getestet. Wichtig: Bei so wenigen "
+               "Ereignissen erzeugt schon der Zufall eine Konzentration von rund 2–4× — die feste "
+               "2,2×-Faustregel aus Abschnitt 4 liegt darunter und würde Zufall als Signal werten. "
+               "Der p-Wert korrigiert das datengetrieben.")
+    st.markdown("---")
+
 st.caption("ShiftWN Energy · Phase 1: Backtest-Controlling · Patentierter geometrischer Kern "
            "(Triangle · Vortex · Impulse FFT · Photonics). Rückschauende Analyse auf historischen Daten. "
            "Vergangene Signale sind keine Garantie für künftige Ergebnisse. Keine Anlageberatung.")
