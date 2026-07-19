@@ -134,6 +134,8 @@ STROM={
     "Strom Österreich (Day-Ahead)": "10YAT-APG------L",
 }
 STROM_ZEIT={"2 Jahre (täglich)":730,"1 Jahr (täglich)":365,"6 Monate (täglich)":180}
+# Stundenauflösung: kürzere Fenster, weil 24 Werte pro Tag anfallen.
+STROM_ZEIT_H={"90 Tage (stündlich)":90,"60 Tage (stündlich)":60,"30 Tage (stündlich)":30}
 
 def _entsoe_token():
     """Token aus Streamlit Secrets. Fehlt er, gibt es None statt eines Absturzes."""
@@ -143,12 +145,15 @@ def _entsoe_token():
         return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def lade_strom(domain, tage):
-    """Day-Ahead-Spotpreise (A44) von ENTSO-E, aggregiert zu Tagesmittelwerten.
+def lade_strom(domain, tage, stuendlich=False):
+    """Day-Ahead-Spotpreise (A44) von ENTSO-E.
 
-    Rückgabe im gleichen Format wie lade_energie: (preise, zeitindex).
-    Die Stundenpreise werden je Tag gemittelt, damit die Geometrie auf
-    derselben Tagesbasis rechnet wie bei Gas und Öl.
+    stuendlich=False: Stundenpreise werden je Tag gemittelt (wie Gas/Öl, Tagesbasis).
+    stuendlich=True:  Stundenpreise unverändert – die eigentliche Tagesstruktur des
+                      Strommarkts (Solardelle mittags, Abendspitze, Negativpreise)
+                      bleibt erhalten. Für Strom ist das die aussagekräftige Auflösung.
+
+    Rückgabe im gleichen Format wie lade_energie: (preise, zeitindex, status).
     """
     token=_entsoe_token()
     if not token:
@@ -159,6 +164,7 @@ def lade_strom(domain, tage):
     fmt="%Y%m%d%H00"
 
     tagesmittel={}
+    stundenwerte={}
     # ENTSO-E erlaubt max. 1 Jahr pro Anfrage -> in Blöcken holen.
     block_start=start
     while block_start < ende:
@@ -205,8 +211,16 @@ def lade_strom(domain, tage):
                     continue
                 tag=stunde.date()
                 tagesmittel.setdefault(tag, []).append(wert)
+                stundenwerte[stunde]=wert
 
         block_start=block_ende
+
+    if stuendlich:
+        if not stundenwerte:
+            return None, None, "keine_daten"
+        stunden_sortiert=sorted(stundenwerte.keys())
+        preise=np.array([float(stundenwerte[s]) for s in stunden_sortiert])
+        return preise, stunden_sortiert, "ok"
 
     if not tagesmittel:
         return None, None, "keine_daten"
@@ -235,7 +249,12 @@ with st.sidebar:
     st.caption("Phase 1 · Backtest-Controlling")
     st.divider()
     markt_name=st.selectbox("Energie-Instrument", list(ENERGIE.keys())+list(STROM.keys()))
-    zeit_name=st.selectbox("Zeitraum", list(ZEIT.keys()))
+    if markt_name in STROM:
+        # Strom: Stundenauflösung zuerst – dort liegt die eigentliche Struktur.
+        zeit_name=st.selectbox("Zeitraum",
+                               list(STROM_ZEIT_H.keys())+list(STROM_ZEIT.keys()))
+    else:
+        zeit_name=st.selectbox("Zeitraum", list(ZEIT.keys()))
     st.divider()
     st.subheader("Signal-Schwellen")
     drift_th=st.slider("Drift (Minimum)",0.04,0.30,0.06,0.01)
@@ -246,18 +265,26 @@ with st.sidebar:
                          ["Immer Long (Kauf-Bias)","Immer Short (Verkauf-Bias)"])
     st.divider()
     if markt_name in STROM:
-        st.caption("Quelle: ENTSO-E Transparency Platform · Day-Ahead-Spotpreise, "
-                   "zu Tagesmittelwerten aggregiert.")
+        if zeit_name in STROM_ZEIT_H:
+            st.caption("Quelle: ENTSO-E Transparency Platform · Day-Ahead-Spotpreise "
+                       "in Stundenauflösung. Solardelle, Abendspitze und Negativpreise "
+                       "bleiben sichtbar.")
+        else:
+            st.caption("Quelle: ENTSO-E Transparency Platform · Day-Ahead-Spotpreise, "
+                       "zu Tagesmittelwerten aggregiert. Die Tagesstruktur wird dabei "
+                       "geglättet – für Strom ist die Stundenauflösung aussagekräftiger.")
     else:
         st.caption("Quelle: Terminmarktdaten (yfinance). Strom-Spotdaten stehen über "
                    "die ENTSO-E-Auswahl zur Verfügung.")
 
 ist_strom = markt_name in STROM
-period,interval=ZEIT[zeit_name]
+strom_stuendlich = ist_strom and zeit_name in STROM_ZEIT_H
 if ist_strom:
     ticker=STROM[markt_name]
+    period,interval=None,None
 else:
     ticker=ENERGIE[markt_name]
+    period,interval=ZEIT[zeit_name]
 
 # ---------------- Kopf ----------------
 st.title("⚡ ShiftWN Energy")
@@ -290,7 +317,8 @@ with st.expander("Was bedeuten Drift und Aussagekraft?"):
 
 with st.spinner(f"Lade {markt_name} ..."):
     if ist_strom:
-        closes, idx, status = lade_strom(ticker, STROM_ZEIT[zeit_name])
+        tage = STROM_ZEIT_H[zeit_name] if strom_stuendlich else STROM_ZEIT[zeit_name]
+        closes, idx, status = lade_strom(ticker, tage, strom_stuendlich)
         if status=="kein_token":
             st.error("Für Strom-Spotdaten fehlt der ENTSO-E-Zugangsschlüssel. "
                      "Er wird in den Streamlit-Secrets als ENTSOE_TOKEN hinterlegt "
@@ -348,7 +376,7 @@ schocks=[r for r in results if r[1]=="SCHOCK"]
 # ============================================================
 st.markdown(f"## <span class='num'>1</span> Überblick — {markt_name}", unsafe_allow_html=True)
 m1,m2,m3,m4=st.columns(4)
-m1.metric("Analysierte Tage", f"{n}")
+m1.metric("Analysierte Stunden" if strom_stuendlich else "Analysierte Tage", f"{n}")
 m2.metric("Eingriffe (Signalwechsel)", f"{len(wechsel)}")
 m3.metric(f"Widerspruch zu '{annahme_kurz}'", f"{len(widerspruch)/n*100:.0f}%")
 m4.metric("Erkannte Regime-Brüche", f"{len(schocks)}")
@@ -375,7 +403,7 @@ for sig,colr in [("BUY",BUY),("SELL",SELL),("SCHOCK",SHOCK)]:
             marker=dict(color=colr,size=6,line=dict(width=0)), name=LABEL.get(sig, sig)))
 fig.update_layout(height=440, template="plotly_white", paper_bgcolor=BG, plot_bgcolor=CARD,
                   margin=dict(l=0,r=0,t=10,b=0), legend=dict(orientation="h",yanchor="bottom",y=1.0),
-                  xaxis=dict(gridcolor=BORDER,title="Handelstage"), yaxis=dict(gridcolor=BORDER,title="Preis"))
+                  xaxis=dict(gridcolor=BORDER,title="Handelsstunden" if strom_stuendlich else "Handelstage"), yaxis=dict(gridcolor=BORDER,title="Preis"))
 st.plotly_chart(fig, use_container_width=True)
 st.caption("Grün = Aufwärts-kohärent · Rot = Abwärts-kohärent · Bernstein = Regime-Bruch. "
            "Graue Linie = Kursverlauf. ShiftWN ist Signalgeber, keine Order-Ausführung.")
